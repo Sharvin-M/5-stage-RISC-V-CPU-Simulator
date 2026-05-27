@@ -9,12 +9,14 @@
 class RiscvPipeline
 {
 private:
-    // --- CPU State ---
-    uint32_t pc = 0;
-    unsigned long clock_cycle = 0;
-    std::array<uint32_t, 32> data_memory{};
-    std::array<uint32_t, 32> register_file{};
-    std::vector<std::string> instruction_memory;
+    
+    uint32_t pc = 0; /* Program Counter. */
+    unsigned long clock_cycle = 0; /* Current Clock Cycle (basically clock_cyle++ represents one cpu tick).*/
+    std::array<uint32_t, 32> data_memory{}; /* Array of 32 ints, each of which are 32 bytes large to represent data memory (off chip mem)*/
+    std::array<uint32_t, 32> register_file{}; /* Array of 32 ints, each are 32 bytes in size, to represent the register file. This is where the registers are located. For example, sp, ra, x1, etc. ..*/
+    std::vector<std::string> instruction_memory; /* A dynamic array of strings, each of which represents a 32-bit instruction saved as a string. This is read from the user input, which is a text file containing 32-bit instructions on each newline. */
+    bool stall_pipeline = false; /* Is the pipeline currently stalled or not? Need to track this for pipelined structure. */
+    int write_data; /* if the instruction writes back to the register, then save the data that was written in this global variable,  */
 
     // --- Struct Definitions ---
     struct ControlSignals
@@ -172,6 +174,9 @@ private:
     // --- Pipeline Stages ---
     void Fetch()
     {
+        if (stall_pipeline)
+            return;
+
         unsigned int target_idx = pc / 4;
         next_if_id = IF_ID{}; // Clear next state
 
@@ -212,36 +217,49 @@ private:
         int opcode = next_id_ex.opcode;
         int imm = 0;
 
+        bool stall = false;
+        if (id_ex.ctrl.mem_read && id_ex.rd != 0 &&
+            (id_ex.rd == next_id_ex.rs1 || id_ex.rd == next_id_ex.rs2)) {
+            stall = true;
+        }
+        if (stall) {
+            next_id_ex = ID_EX{};
+            stall_pipeline = true;
+            return;
+        }
+
+        stall_pipeline = false;
+
         if (opcode == 0x33 || opcode == 0x3B)
         { // R-Type
             imm = 0;
-        }
-        else if (opcode == 0x67 || opcode == 0x03 || opcode == 0x13)
-        { // I-Type
-            imm = static_cast<int32_t>(int_instr) >> 20;
-        }
-        else if (opcode == 0x23)
-        { // S-Type
-            imm = ((static_cast<int32_t>(int_instr & 0xFE000000) >> 20) | ((int_instr >> 7) & 0x1F));
-        }
-        else if (opcode == 0x63)
-        { // B-Type
-            imm = ((static_cast<int32_t>(int_instr & 0x80000000) >> 19) |
-                   ((int_instr & 0x00000080) << 4) |
-                   ((int_instr & 0x7E000000) >> 20) |
-                   ((int_instr & 0x00000F00) >> 7));
-        }
-        else if (opcode == 0x17 || opcode == 0x37)
-        { // U-Type
-            imm = int_instr & 0xFFFFF000;
-        }
-        else if (opcode == 0x6F)
-        { // J-Type
-            imm = ((static_cast<int32_t>(int_instr & 0x80000000) >> 11) |
-                   (int_instr & 0x000FF000) |
-                   ((int_instr & 0x00100000) >> 9) |
-                   ((int_instr & 0x7FE00000) >> 20));
-        }
+            }
+            else if (opcode == 0x67 || opcode == 0x03 || opcode == 0x13)
+            { // I-Type
+                imm = static_cast<int32_t>(int_instr) >> 20;
+            }
+            else if (opcode == 0x23)
+            { // S-Type
+                imm = ((static_cast<int32_t>(int_instr & 0xFE000000) >> 20) | ((int_instr >> 7) & 0x1F));
+            }
+            else if (opcode == 0x63)
+            { // B-Type
+                imm = ((static_cast<int32_t>(int_instr & 0x80000000) >> 19) |
+                       ((int_instr & 0x00000080) << 4) |
+                       ((int_instr & 0x7E000000) >> 20) |
+                       ((int_instr & 0x00000F00) >> 7));
+            }
+            else if (opcode == 0x17 || opcode == 0x37)
+            { // U-Type
+                imm = int_instr & 0xFFFFF000;
+            }
+            else if (opcode == 0x6F)
+            { // J-Type
+                imm = ((static_cast<int32_t>(int_instr & 0x80000000) >> 11) |
+                       (int_instr & 0x000FF000) |
+                       ((int_instr & 0x00100000) >> 9) |
+                       ((int_instr & 0x7FE00000) >> 20));
+            }
 
         next_id_ex.imm = imm;
         ControlUnit(opcode, next_id_ex.funct3, next_id_ex.funct7, next_id_ex.ctrl);
@@ -254,31 +272,64 @@ private:
         if (!id_ex.valid)
             return;
 
-        int operandA = id_ex.rs1_val;
-        int operandB = id_ex.ctrl.alu_src ? id_ex.imm : id_ex.rs2_val;
+        int forwardA = 0;
+        int forwardB = 0;
+
+        if (ex_mem.ctrl.reg_write && ex_mem.rd != 0)
+        {
+            if (ex_mem.rd == id_ex.rs1)
+                forwardA = 2;
+            if (ex_mem.rd == id_ex.rs2)
+                forwardB = 2;
+        }
+
+        if (mem_wb.ctrl.reg_write && mem_wb.rd != 0)
+        {
+            if (mem_wb.rd == id_ex.rs1 && forwardA != 2)
+                forwardA = 1;
+            if (mem_wb.rd == id_ex.rs2 && forwardB != 2)
+                forwardB = 1;
+        }
+
+        int alu_input_A = id_ex.rs1_val;
+        if (forwardA == 2)
+            alu_input_A = ex_mem.alu_result;
+        else if (forwardA == 1)
+            alu_input_A = write_data; // Helper function to get what WB is about to write
+
+        int forwarded_rs2_val = id_ex.rs2_val;
+        if (forwardB == 2)
+            forwarded_rs2_val = ex_mem.alu_result;
+        else if (forwardB == 1)
+            forwarded_rs2_val = write_data;
+
+        // The second ALU operand is either the forwarded Rs2 OR the immediate value
+        int alu_input_B = id_ex.ctrl.alu_src ? id_ex.imm : forwarded_rs2_val;
 
         switch (id_ex.ctrl.alu_ctrl)
         {
         case 0:
-            next_ex_mem.alu_result = operandA & operandB;
+            next_ex_mem.alu_result = alu_input_A & alu_input_B;
             break;
         case 1:
-            next_ex_mem.alu_result = operandA | operandB;
+            next_ex_mem.alu_result = alu_input_A | alu_input_B;
             break;
         case 2:
-            next_ex_mem.alu_result = operandA + operandB;
+            next_ex_mem.alu_result = alu_input_A + alu_input_B;
             break;
         case 6:
-            next_ex_mem.alu_result = operandA - operandB;
+            next_ex_mem.alu_result = alu_input_A - alu_input_B;
             break;
         case 7:
-            next_ex_mem.alu_result = (operandA < operandB) ? 1 : 0;
+            next_ex_mem.alu_result = (alu_input_A < alu_input_B) ? 1 : 0;
             break;
         default:
             next_ex_mem.alu_result = 0;
             break;
         }
 
+        next_ex_mem.rs2_val = forwarded_rs2_val;
+    
         next_ex_mem.alu_zero = (next_ex_mem.alu_result == 0);
 
         bool take_branch = false;
@@ -337,6 +388,9 @@ private:
         {
             pc = ex_mem.branch_target;
             std::cout << "pc is modified to 0x" << std::hex << pc << std::dec << " (Branch/Jump Taken)\n";
+
+            next_if_id = IF_ID{};
+            next_id_ex = ID_EX{};
         }
 
         next_mem_wb.alu_result = ex_mem.alu_result;
@@ -352,7 +406,6 @@ private:
 
         if (mem_wb.ctrl.reg_write && mem_wb.rd != 0)
         {
-            int write_data;
             if (mem_wb.ctrl.mem_to_reg)
                 write_data = mem_wb.mem_read_data;
             else if (mem_wb.ctrl.jump)
@@ -374,6 +427,93 @@ private:
         id_ex = next_id_ex;
         ex_mem = next_ex_mem;
         mem_wb = next_mem_wb;
+    }
+
+    void PrintPipelineTrace()
+    {
+        std::cout << "==========================================\n";
+        std::cout << " Clock Cycle: " << clock_cycle << "\n";
+        std::cout << "==========================================\n";
+
+        // 1. FETCH STAGE (Looks at what Fetch put into next_if_id)
+        std::cout << "[FETCH]     ";
+        if (stall_pipeline)
+        {
+            std::cout << "STALLED (PC held at 0x" << std::hex << pc << std::dec << ")\n";
+        }
+        else if (next_if_id.valid)
+        {
+            std::cout << "Fetched PC: 0x" << std::hex << next_if_id.pc << std::dec
+                      << " (Instr: 0x" << std::hex << next_if_id.int_instr << std::dec << ")\n";
+        }
+        else
+        {
+            std::cout << "NOP (Bubble)\n";
+        }
+
+        // 2. DECODE STAGE (Looks at what Decode put into next_id_ex)
+        std::cout << "[DECODE]    ";
+        if (next_id_ex.valid)
+        {
+            std::cout << "Opcode: " << next_id_ex.opcode
+                      << " | Rs1: x" << next_id_ex.rs1 << " (Val: " << next_id_ex.rs1_val << ")"
+                      << " | Rs2: x" << next_id_ex.rs2 << " (Val: " << next_id_ex.rs2_val << ")"
+                      << " | Rd: x" << next_id_ex.rd
+                      << " | Imm: " << next_id_ex.imm << "\n";
+        }
+        else
+        {
+            std::cout << "NOP (Bubble)\n";
+        }
+
+        // 3. EXECUTE STAGE (Looks at what Execute put into next_ex_mem)
+        std::cout << "[EXECUTE]   ";
+        if (next_ex_mem.valid)
+        {
+            std::cout << "ALU Result: 0x" << std::hex << next_ex_mem.alu_result << std::dec
+                      << " | Zero: " << (next_ex_mem.alu_zero ? "T" : "F")
+                      << " | Branch Target: 0x" << std::hex << next_ex_mem.branch_target << std::dec << "\n";
+        }
+        else
+        {
+            std::cout << "NOP (Bubble)\n";
+        }
+
+        // 4. MEMORY STAGE (Looks at what Mem put into next_mem_wb)
+        std::cout << "[MEMORY]    ";
+        if (next_mem_wb.valid)
+        {
+            if (next_mem_wb.ctrl.mem_write)
+                std::cout << "Writing to Mem... ";
+            else if (next_mem_wb.ctrl.mem_read)
+                std::cout << "Reading from Mem... (Read Data: " << next_mem_wb.mem_read_data << ")\n";
+            else
+                std::cout << "No Mem Access\n";
+        }
+        else
+        {
+            std::cout << "NOP (Bubble)\n";
+        }
+
+        // 5. WRITEBACK STAGE (Looks at what WB just wrote to the register file)
+        std::cout << "[WRITEBACK] ";
+        if (mem_wb.valid)
+        {
+            if (mem_wb.ctrl.reg_write && mem_wb.rd != 0)
+            {
+                std::cout << "Wrote Data: " << write_data << " to Register x" << mem_wb.rd << "\n";
+            }
+            else
+            {
+                std::cout << "No Register Write\n";
+            }
+        }
+        else
+        {
+            std::cout << "NOP (Bubble)\n";
+        }
+
+        std::cout << "\n";
     }
 
 public:
@@ -426,6 +566,8 @@ public:
             {
                 break; // Pipeline drained
             }
+
+            PrintPipelineTrace();
 
             clock_cycle++;
             UpdateRegisters();
