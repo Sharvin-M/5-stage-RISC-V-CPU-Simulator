@@ -562,9 +562,9 @@ public:
             Decode();
             Fetch();
 
-            if (!next_if_id.valid && !id_ex.valid && !ex_mem.valid && !mem_wb.valid)
+            if (!next_if_id.valid && !next_id_ex.valid && !next_ex_mem.valid && !next_mem_wb.valid && !mem_wb.valid)
             {
-                break; // Pipeline drained
+                break; // Pipeline is officially empty
             }
 
             PrintPipelineTrace();
