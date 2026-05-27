@@ -1,0 +1,4 @@
+*.out
+experiment.c
+decode.h
+simulate
