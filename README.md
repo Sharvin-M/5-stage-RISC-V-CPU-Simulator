@@ -1,4 +1,4 @@
-# RV32I Pipelined Instruction Set Simulator
+# RV32I Pipelined CPU
 
 A functional-level RISC-V simulator written in C++, designed to emulate the RV32I base integer instruction set. 
 
