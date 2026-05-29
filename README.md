@@ -26,9 +26,9 @@ The primary focus of ongoing development is expanding instruction support to rea
 - [ ] **Cache Simulation:** Implementing L1 data/instruction caches to simulate memory latency and cache misses.
 
 ## Usage
-Compile the simulator using a modern C++ compiler (requires C++11 or higher):
+Compile the simulator using a modern C++ compiler:
 
 ```bash
-g++ pipeline_sim.cpp -o rv32i_sim
+g++ -std=c++17 -Werror -Wall main.cpp -o rv32i_sim
 ./rv32i_sim instructions.txt
 ```
